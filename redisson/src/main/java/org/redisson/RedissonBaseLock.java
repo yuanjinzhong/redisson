@@ -124,6 +124,9 @@ public abstract class RedissonBaseLock extends RedissonExpirable implements RLoc
         return id + ":" + threadId;
     }
 
+    /**
+     * 锁续期逻辑， 每隔internalLockLeaseTime / 3 秒，续约 每隔internalLockLeaseTime秒
+     */
     private void renewExpiration() {
         ExpirationEntry ee = EXPIRATION_RENEWAL_MAP.get(getEntryName());
         if (ee == null) {
@@ -141,7 +144,7 @@ public abstract class RedissonBaseLock extends RedissonExpirable implements RLoc
                 if (threadId == null) {
                     return;
                 }
-                
+                // 续约逻辑
                 CompletionStage<Boolean> future = renewExpirationAsync(threadId);
                 future.whenComplete((res, e) -> {
                     if (e != null) {
@@ -149,7 +152,7 @@ public abstract class RedissonBaseLock extends RedissonExpirable implements RLoc
                         EXPIRATION_RENEWAL_MAP.remove(getEntryName());
                         return;
                     }
-                    
+                    // res 返回true ，也就是 key续约成功，则继续续约
                     if (res) {
                         // reschedule itself
                         renewExpiration();
@@ -158,8 +161,9 @@ public abstract class RedissonBaseLock extends RedissonExpirable implements RLoc
                     }
                 });
             }
-        }, internalLockLeaseTime / 3, TimeUnit.MILLISECONDS);
-        
+        }, internalLockLeaseTime / 3, TimeUnit.MILLISECONDS); //watchdog 会每lockWatchdogTimeout/3时间，去延时
+
+
         ee.setTimeout(task);
     }
     
@@ -184,9 +188,9 @@ public abstract class RedissonBaseLock extends RedissonExpirable implements RLoc
         return evalWriteSyncedAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
                 "if (redis.call('hexists', KEYS[1], ARGV[2]) == 1) then " +
                         "redis.call('pexpire', KEYS[1], ARGV[1]); " +
-                        "return 1; " +
+                        "return 1; " + // 成功续约 返回 1, 也就是fasle
                         "end; " +
-                        "return 0;",
+                        "return 0;", // key 不存在 or 续约失败 ,则返回0,也就是false
                 Collections.singletonList(getRawName()),
                 internalLockLeaseTime, getLockName(threadId));
     }

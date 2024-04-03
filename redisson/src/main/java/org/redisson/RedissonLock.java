@@ -186,11 +186,11 @@ public class RedissonLock extends RedissonBaseLock {
     }
 
     private RFuture<Long> tryAcquireAsync(long waitTime, long leaseTime, TimeUnit unit, long threadId) {
-        RFuture<Long> ttlRemainingFuture;
+        RFuture<Long> ttlRemainingFuture;//ttl续期的feature
         if (leaseTime > 0) {
             ttlRemainingFuture = tryLockInnerAsync(waitTime, leaseTime, unit, threadId, RedisCommands.EVAL_LONG);
         } else {
-            ttlRemainingFuture = tryLockInnerAsync(waitTime, internalLockLeaseTime,
+            ttlRemainingFuture = tryLockInnerAsync(waitTime, internalLockLeaseTime, // 没设置ttl,则给30秒（watch dog 给锁续约的时间）
                     TimeUnit.MILLISECONDS, threadId, RedisCommands.EVAL_LONG);
         }
         CompletionStage<Long> s = handleNoSync(threadId, ttlRemainingFuture);
@@ -202,7 +202,7 @@ public class RedissonLock extends RedissonBaseLock {
                 if (leaseTime > 0) {
                     internalLockLeaseTime = unit.toMillis(leaseTime);
                 } else {
-                    scheduleExpirationRenewal(threadId);
+                    scheduleExpirationRenewal(threadId); // 锁的key 续约的ttl
                 }
             }
             return ttlRemaining;
