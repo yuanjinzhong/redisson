@@ -111,8 +111,12 @@ public class RedissonLock extends RedissonBaseLock {
             return;
         }
 
+        /**
+         * 订阅的时候会创建Listener org.redisson.pubsub.PublishSubscribe.createListener
+         * listener里面会把 entry里的信号量释放
+         */
         CompletableFuture<RedissonLockEntry> future = subscribe(threadId);
-        pubSub.timeout(future);
+        pubSub.timeout(future); //设置一个超时job,超过时间该订阅就设置异常
         RedissonLockEntry entry;
         if (interruptibly) {
             entry = commandExecutor.getInterrupted(future);
@@ -131,6 +135,10 @@ public class RedissonLock extends RedissonBaseLock {
                 // waiting for message
                 if (ttl >= 0) {
                     try {
+                        /**
+                         * 这里阻塞等待信号量释放, 初始信号量为0:this.latch = new Semaphore(0);
+                         * 也就是从初始状态阻塞,直到 reids的发布订阅逻辑,检测到lua脚本锁释放之后,主动调用信号量的release方法
+                         */
                         entry.getLatch().tryAcquire(ttl, TimeUnit.MILLISECONDS);
                     } catch (InterruptedException e) {
                         if (interruptibly) {
@@ -175,9 +183,9 @@ public class RedissonLock extends RedissonBaseLock {
             // lock acquired
             if (acquired) {
                 if (leaseTime > 0) {
-                    internalLockLeaseTime = unit.toMillis(leaseTime);
+                    internalLockLeaseTime = unit.toMillis(leaseTime);  // 这一行,貌似没啥用
                 } else {
-                    scheduleExpirationRenewal(threadId);
+                    scheduleExpirationRenewal(threadId); //则以配置的internalLockLeaseTime为ttl续约,默认30秒
                 }
             }
             return acquired;
@@ -185,11 +193,19 @@ public class RedissonLock extends RedissonBaseLock {
         return new CompletableFutureWrapper<>(f);
     }
 
+    /**
+     * 比v3.13.6版本做了优化, 该本版只有没设置leaseTime的加锁操作,才会设置watchDog,当前版本不管是否设置leaseTime 都会watchDog
+     * @param waitTime
+     * @param leaseTime
+     * @param unit
+     * @param threadId
+     * @return
+     */
     private RFuture<Long> tryAcquireAsync(long waitTime, long leaseTime, TimeUnit unit, long threadId) {
         RFuture<Long> ttlRemainingFuture;//ttl续期的feature
-        if (leaseTime > 0) {
+        if (leaseTime > 0) {//设置了key过期时间
             ttlRemainingFuture = tryLockInnerAsync(waitTime, leaseTime, unit, threadId, RedisCommands.EVAL_LONG);
-        } else {
+        } else { // 没设置过期时间,
             ttlRemainingFuture = tryLockInnerAsync(waitTime, internalLockLeaseTime, // 没设置ttl,则给30秒（watch dog 给锁续约的时间）
                     TimeUnit.MILLISECONDS, threadId, RedisCommands.EVAL_LONG);
         }
@@ -200,9 +216,15 @@ public class RedissonLock extends RedissonBaseLock {
             // lock acquired
             if (ttlRemaining == null) {
                 if (leaseTime > 0) {
+                    /**
+                     * 其实这里是针对线程重入的场景的优化
+                     * 一个线程,针对同一把锁重入时,只要有一次设置了leaseTime,则后续可能发生的watchDog机制,就以该leaseTime作为续约TTl, leaseTime/3作为调度间隔
+                     *
+                     * 基于的考虑: 同一个线程,同一个锁,那么用户设置的leaseTime应该比默认的30秒合理
+                     */
                     internalLockLeaseTime = unit.toMillis(leaseTime);
                 } else {
-                    scheduleExpirationRenewal(threadId); // 锁的key 续约的ttl
+                    scheduleExpirationRenewal(threadId); // watchDog 锁续约,默认的internalLockLeaseTime:30秒
                 }
             }
             return ttlRemaining;
@@ -217,13 +239,13 @@ public class RedissonLock extends RedissonBaseLock {
 
     <T> RFuture<T> tryLockInnerAsync(long waitTime, long leaseTime, TimeUnit unit, long threadId, RedisStrictCommand<T> command) {
         return evalWriteSyncedAsync(getRawName(), LongCodec.INSTANCE, command,
-                "if ((redis.call('exists', KEYS[1]) == 0) " +
-                            "or (redis.call('hexists', KEYS[1], ARGV[2]) == 1)) then " +
-                        "redis.call('hincrby', KEYS[1], ARGV[2], 1); " +
-                        "redis.call('pexpire', KEYS[1], ARGV[1]); " +
-                        "return nil; " +
+                "if ((redis.call('exists', KEYS[1]) == 0) " +    // 大key不存在
+                            "or (redis.call('hexists', KEYS[1], ARGV[2]) == 1)) then " + // 当前线程持有锁
+                        "redis.call('hincrby', KEYS[1], ARGV[2], 1); " +  // 重入+1
+                        "redis.call('pexpire', KEYS[1], ARGV[1]); " +     // 过期时间
+                        "return nil; " +                      // 返回,推出
                     "end; " +
-                    "return redis.call('pttl', KEYS[1]);",
+                    "return redis.call('pttl', KEYS[1]);",  // 上面条件不满足(大key存在,但是其他线程持有锁),返回大key的剩余ttl
                 Collections.singletonList(getRawName()), unit.toMillis(leaseTime), getLockName(threadId));
     }
 
@@ -346,7 +368,7 @@ public class RedissonLock extends RedissonBaseLock {
                               "local val = redis.call('get', KEYS[3]); " +
                                     "if val ~= false then " +
                                         "return tonumber(val);" +
-                                    "end; " +
+                                    "end; " +                                     // 发布订阅的key存在,表示本次释放锁,已经发布过消息了
 
                                     "if (redis.call('hexists', KEYS[1], ARGV[3]) == 0) then " +
                                         "return nil;" +
@@ -354,17 +376,17 @@ public class RedissonLock extends RedissonBaseLock {
                                     "local counter = redis.call('hincrby', KEYS[1], ARGV[3], -1); " +
                                     "if (counter > 0) then " +
                                         "redis.call('pexpire', KEYS[1], ARGV[2]); " +
-                                        "redis.call('set', KEYS[3], 0, 'px', ARGV[5]); " +
+                                        "redis.call('set', KEYS[3], 0, 'px', ARGV[5]); " +  // 这个key[3] 是发布订阅的那个key: redisson_unlock_latch:yuXinLock{1}:72c8761cb765f72526de8d32ddc86616
                                         "return 0; " +
                                     "else " +
                                         "redis.call('del', KEYS[1]); " +
-                                        "redis.call(ARGV[4], KEYS[2], ARGV[1]); " +
-                                        "redis.call('set', KEYS[3], 1, 'px', ARGV[5]); " +
+                                        "redis.call(ARGV[4], KEYS[2], ARGV[1]); " + // ARGV[4]对应着:getSubscribeService().getPublishCommand(),也就是"PUBLISH"命令
+                                        "redis.call('set', KEYS[3], 1, 'px', ARGV[5]); " +  // Px 设置过期时间,单位毫秒
                                         "return 1; " +
                                     "end; ",
-                                Arrays.asList(getRawName(), getChannelName(), getUnlockLatchName(requestId)),
-                                LockPubSub.UNLOCK_MESSAGE, internalLockLeaseTime,
-                                getLockName(threadId), getSubscribeService().getPublishCommand(), timeout);
+                                Arrays.asList(getRawName(), getChannelName(), getUnlockLatchName(requestId)),// KEYS[1],KEYS[2],KEYS[3]
+                                LockPubSub.UNLOCK_MESSAGE, internalLockLeaseTime,  //  ARGV[1],ARGV[2]
+                                getLockName(threadId), getSubscribeService().getPublishCommand(), timeout);// ARGV[3] ARGV[4] ARGV[25]
     }
 
     @Override

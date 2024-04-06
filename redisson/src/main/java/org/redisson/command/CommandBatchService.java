@@ -379,7 +379,7 @@ public class CommandBatchService extends CommandAsyncService {
             });
         }
 
-        execute(voidPromise);
+        execute(voidPromise);// 这里面设置 wait命令
         return new CompletableFutureWrapper<>(promise);
     }
 
@@ -473,6 +473,9 @@ public class CommandBatchService extends CommandAsyncService {
                             if (this.options.isSyncAOF()) {
                                 options.syncAOF(this.options.getSyncLocals(), this.options.getSyncSlaves(), Duration.ofMillis(this.options.getSyncTimeout()));
                             } else {
+                                /**
+                                 * 在eval执行lua脚本之后, 设置wait命令, 阻塞等待 master-slave之间key值同步,避免故障转移得时候,slave上key丢失
+                                 */
                                 options.sync(this.options.getSyncSlaves(), Duration.ofMillis(this.options.getSyncTimeout()));
                             }
 

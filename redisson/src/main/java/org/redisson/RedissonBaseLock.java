@@ -132,7 +132,10 @@ public abstract class RedissonBaseLock extends RedissonExpirable implements RLoc
         if (ee == null) {
             return;
         }
-        
+
+        /**
+         * netty hash时间轮定时任务
+         */
         Timeout task = getServiceManager().newTimeout(new TimerTask() {
             @Override
             public void run(Timeout timeout) throws Exception {
@@ -169,6 +172,7 @@ public abstract class RedissonBaseLock extends RedissonExpirable implements RLoc
     
     protected void scheduleExpirationRenewal(long threadId) {
         ExpirationEntry entry = new ExpirationEntry();
+        // 这里是针对线程重入时候,对续约任务的控制
         ExpirationEntry oldEntry = EXPIRATION_RENEWAL_MAP.putIfAbsent(getEntryName(), entry);
         if (oldEntry != null) {
             oldEntry.addThreadId(threadId);
@@ -295,9 +299,9 @@ public abstract class RedissonBaseLock extends RedissonExpirable implements RLoc
     }
 
     private RFuture<Void> unlockAsync0(long threadId) {
-        CompletionStage<Boolean> future = unlockInnerAsync(threadId);
+        CompletionStage<Boolean> future = unlockInnerAsync(threadId);// lua释放锁
         CompletionStage<Void> f = future.handle((res, e) -> {
-            cancelExpirationRenewal(threadId, res);
+            cancelExpirationRenewal(threadId, res); // 取消看门狗
 
             if (e != null) {
                 if (e instanceof CompletionException) {
@@ -318,9 +322,10 @@ public abstract class RedissonBaseLock extends RedissonExpirable implements RLoc
     }
 
     @Override
-    public void unlock() {
+    public void
+    unlock() {
         try {
-            get(unlockAsync(Thread.currentThread().getId()));
+            get(unlockAsync(Thread.currentThread().getId())); //指定线程释放锁
         } catch (RedisException e) {
             if (e.getCause() instanceof IllegalMonitorStateException) {
                 throw (IllegalMonitorStateException) e.getCause();
@@ -356,13 +361,13 @@ public abstract class RedissonBaseLock extends RedissonExpirable implements RLoc
         MasterSlaveServersConfig config = getServiceManager().getConfig();
         int timeout = (config.getTimeout() + config.getRetryInterval()) * config.getRetryAttempts();
         timeout = Math.max(timeout, 1);
-        RFuture<Boolean> r = unlockInnerAsync(threadId, id, timeout);
+        RFuture<Boolean> r = unlockInnerAsync(threadId, id, timeout);// 这里lua脚本释放锁,但是没有删除锁
         CompletionStage<Boolean> ff = r.thenApply(v -> {
             CommandAsyncExecutor ce = commandExecutor;
             if (ce instanceof CommandBatchService) {
                 ce = new CommandBatchService(commandExecutor);
             }
-            ce.writeAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.DEL, getUnlockLatchName(id));
+            ce.writeAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.DEL, getUnlockLatchName(id));// 这里用DEL命令,删除发布订阅的key,不是业务锁
             if (ce instanceof CommandBatchService) {
                 ((CommandBatchService) ce).executeAsync();
             }
