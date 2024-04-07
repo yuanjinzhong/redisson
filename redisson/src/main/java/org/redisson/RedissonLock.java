@@ -183,7 +183,13 @@ public class RedissonLock extends RedissonBaseLock {
             // lock acquired
             if (acquired) {
                 if (leaseTime > 0) {
-                    internalLockLeaseTime = unit.toMillis(leaseTime);  // 这一行,貌似没啥用
+                    /**
+                     * 其实这里是针对线程重入的场景的优化
+                     * 一个线程,针对同一把锁重入时,只要有一次设置了leaseTime,则后续可能发生的watchDog机制,就以该leaseTime作为续约TTl, leaseTime/3作为调度间隔
+                     *
+                     * 基于的考虑: 同一个线程,同一个锁,那么用户设置的leaseTime应该比默认的30秒合理
+                     */
+                    internalLockLeaseTime = unit.toMillis(leaseTime);
                 } else {
                     scheduleExpirationRenewal(threadId); //则以配置的internalLockLeaseTime为ttl续约,默认30秒
                 }
