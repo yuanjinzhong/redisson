@@ -200,7 +200,8 @@ public class RedissonLock extends RedissonBaseLock {
     }
 
     /**
-     * 比v3.13.6版本做了优化, 该本版只有没设置leaseTime的加锁操作,才会设置watchDog,当前版本不管是否设置leaseTime 都会watchDog
+     * 比v3.13.6版本做了优化：在锁重入的时候，只要有一次设置了leaseTime，则将leaseTime赋值给internalLockLeaseTime、用来做后续的看门狗逻辑
+     * 但是 ‘用户没传leaseTime则进行看门狗逻辑’ 这个前提不变
      * @param waitTime
      * @param leaseTime
      * @param unit
@@ -230,7 +231,7 @@ public class RedissonLock extends RedissonBaseLock {
                      */
                     internalLockLeaseTime = unit.toMillis(leaseTime);
                 } else {
-                    scheduleExpirationRenewal(threadId); // watchDog 锁续约,默认的internalLockLeaseTime:30秒
+                    scheduleExpirationRenewal(threadId); // 依然是leaseTime没传才进行看门狗逻辑、 watchDog 锁续约,默认的internalLockLeaseTime:30秒
                 }
             }
             return ttlRemaining;
